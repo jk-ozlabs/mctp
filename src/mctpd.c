@@ -1658,69 +1658,70 @@ static int peer_set_mtu(struct ctx *ctx, struct peer *peer, uint32_t mtu)
 	return rc;
 }
 
-// checks if EIDs from bridge + 1 has contiguous max_pool_size available eids
-// returns next candidate eid for pool start
-static int get_next_pool_start(mctp_eid_t bridge_eid, struct net *n,
-			       struct ctx *ctx)
+struct eid_allocation {
+	mctp_eid_t start;
+	unsigned int extent; /* 0 = only the start EID */
+};
+
+/* Allocate an unused dynamic EID for a peer, optionally with an associated
+ * bridge range (of size @bridged_len).
+ *
+ * We try to find the first allocation that contains the base EID plus the
+ * full range. If no space for that exists, we return the largest
+ * possible range. If the requested range is 0, then the first available
+ * (single) EID will suit as a match, the returned alloc->extent will be zero.
+ *
+ * It is up to the caller to check whether this range is suitable, and
+ * actually reserve that EID (& range) if so.
+ *
+ * returns 0 on success (with @alloc populated), non-zero on failure.
+ */
+static int allocate_eid(struct ctx *ctx, struct net *net,
+			unsigned int bridged_len, struct eid_allocation *alloc)
 {
-	mctp_eid_t e;
-	if (bridge_eid + ctx->max_pool_size > ctx->dyn_eid_max) {
-		return -EADDRNOTAVAIL;
-	}
-	for (e = bridge_eid + 1; e <= bridge_eid + ctx->max_pool_size; e++) {
-		// found a bridge in between, need to skip its pool range
-		if (n->peers[e] != NULL) {
-			e += n->peers[e]->pool_size;
-			return e;
+	struct eid_allocation cur = { 0 }, best = { 0 };
+	mctp_eid_t eid;
+
+	for (eid = ctx->dyn_eid_min; eid <= ctx->dyn_eid_max; eid++) {
+		if (net->peers[eid]) {
+			// reset our current candidate allocation
+			cur.start = 0;
+			eid += net->peers[eid]->pool_size;
+			continue;
 		}
-	}
 
-	return bridge_eid + 1;
-}
+		// start a new candidate allocation
+		if (!cur.start)
+			cur.start = eid;
+		cur.extent = eid - cur.start;
 
-static int get_bridge_eid(struct net *n, struct ctx *ctx,
-			  bool *is_pool_possible, bool *out_of_eids,
-			  mctp_eid_t e, uint32_t net, const dest_phys *dest)
-{
-	int next_pool_start = get_next_pool_start(e, n, ctx);
-	if (next_pool_start < 0) {
-		warnx("Ran out of EIDs from net %d while "
-		      "allocating bridge downstream endpoint at %s ",
-		      net, dest_phys_tostr(dest));
-		*is_pool_possible = false;
-		*out_of_eids = true;
-		/*ran out of pool eid : set only bridge eid then.
-		find first available bridge eid which is not part of any pool*/
-		for (e = ctx->dyn_eid_min; e <= ctx->dyn_eid_max; e++) {
-			if (n->peers[e]) {
-				// used peer may be a bridge, skip its eid range
-				e += n->peers[e]->pool_size;
-				continue;
-			}
-			break;
+		// if this suits, we're done
+		if (cur.extent == bridged_len) {
+			*alloc = cur;
+			return 0;
 		}
-	} else if (next_pool_start != e + 1) {
-		// e doesn't have any contiguous max pool size eids available
-		*is_pool_possible = false;
-		e = next_pool_start;
-	} else {
-		// found contigous eids of max_pool_size from bridge_eid
-		*is_pool_possible = true;
+
+		if (cur.extent > best.extent)
+			best = cur;
 	}
 
-	return e;
+	if (best.start) {
+		*alloc = best;
+		return 0;
+	}
+
+	return -1;
 }
 
 static int endpoint_assign_eid(struct ctx *ctx, sd_bus_error *berr,
 			       const dest_phys *dest, struct peer **ret_peer,
 			       mctp_eid_t static_eid, bool assign_bridge)
 {
-	mctp_eid_t e, new_eid;
+	mctp_eid_t new_eid;
 	struct net *n = NULL;
 	struct peer *peer = NULL;
 	uint32_t net;
 	int rc;
-	bool is_pool_possible = false;
 
 	net = mctp_nl_net_byindex(ctx->nl, dest->ifindex);
 	if (!net) {
@@ -1741,45 +1742,43 @@ static int endpoint_assign_eid(struct ctx *ctx, sd_bus_error *berr,
 
 		new_eid = static_eid;
 	} else {
-		/* Find an unused dynamic EID */
-		for (e = ctx->dyn_eid_min; e <= ctx->dyn_eid_max; e++) {
-			if (n->peers[e]) {
-				// used peer may be a bridge, skip its eid range
-				e += n->peers[e]->pool_size;
-				continue;
-			}
+		struct eid_allocation alloc;
+		unsigned int alloc_size = 0;
 
-			// check for max sized pool from e + 1
-			if (assign_bridge) {
-				bool out_of_eids = false;
-				e = get_bridge_eid(n, ctx, &is_pool_possible,
-						   &out_of_eids, e, net, dest);
-				if (!is_pool_possible) {
-					if (!out_of_eids)
-						continue;
-					else {
-						if (e > ctx->dyn_eid_max)
-							break;
-					}
-				}
-			}
+		if (assign_bridge)
+			alloc_size = ctx->max_pool_size;
 
-			rc = add_peer(ctx, dest, e, net, &peer);
-			if (rc < 0)
-				return rc;
-			if (assign_bridge && is_pool_possible) {
-				peer->pool_size = ctx->max_pool_size;
-				peer->pool_start = e + 1;
-			}
-			break;
-		}
-		if (e > ctx->dyn_eid_max) {
-			warnx("Ran out of EIDs for net %d, allocating %s", net,
-			      dest_phys_tostr(dest));
+		rc = allocate_eid(ctx, n, alloc_size, &alloc);
+		if (rc) {
+			warnx("Cannot allocate any EID (+pool %d) on net %d for %s",
+			      alloc_size, net, dest_phys_tostr(dest));
 			sd_bus_error_setf(berr, SD_BUS_ERROR_FAILED,
 					  "Ran out of EIDs");
 			return -EADDRNOTAVAIL;
 		}
+
+		/* Only allow complete pools for now. In future we could reserve
+		 * this range, in the assumption that the subsequent pool
+		 * request (in the Set Endpoint ID response) will fit in this
+		 * reservation.
+		 */
+		if (alloc.extent < alloc_size) {
+			warnx("Cannot allocate sufficient EIDs (+pool %d) on net %d for %s"
+			      " (largest span %d at %d)",
+			      alloc_size, net, dest_phys_tostr(dest),
+			      alloc.extent, alloc.start);
+			alloc.extent = 0;
+		}
+
+		new_eid = alloc.start;
+
+		rc = add_peer(ctx, dest, new_eid, net, &peer);
+		if (rc < 0)
+			return rc;
+
+		peer->pool_size = alloc.extent;
+		if (peer->pool_size)
+			peer->pool_start = new_eid + 1;
 	}
 
 	rc = endpoint_send_set_endpoint_id(peer, &new_eid);
@@ -1808,11 +1807,6 @@ static int endpoint_assign_eid(struct ctx *ctx, sd_bus_error *berr,
 			remove_peer(peer);
 			return rc;
 		}
-	}
-
-	if (!is_pool_possible) {
-		peer->pool_size = 0;
-		peer->pool_start = 0;
 	}
 
 	rc = setup_added_peer(peer);
