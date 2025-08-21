@@ -228,13 +228,13 @@ two properties:
 
 ### `.PoolStart`: `y`
 
-A constant property representing first EID in the contiguous range allocated
-for downstream endpoints.
+A constant property representing first EID in the range allocated for downstream
+endpoints.
 
 ### `.PoolEnd`: `y`
 
-A constant property representing last EID in the contiguous range allocated
-for downstream endpoints.
+A constant property representing last EID in the range allocated for downstream
+endpoints.
 
 ## Configuration
 
