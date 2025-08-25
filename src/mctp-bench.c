@@ -686,7 +686,9 @@ static int command(mctp_eid_t eid, int net, enum command command,
 	/* on a recent kernel (ie., any with MCTP support), getrandom is
 	 * infallible with <=256-byte lengths
 	 */
-	(void)getrandom(&req->iid, sizeof(req->iid), 0);
+	ssize_t len = getrandom(&req->iid, sizeof(req->iid), 0);
+	if (len != sizeof(req->iid))
+		err(EXIT_FAILURE, "getrandom");
 	memcpy(req->body, body, body_len);
 
 	rc = sendto(sd, req, req_len, 0, (struct sockaddr *)&addr,
