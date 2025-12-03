@@ -80,12 +80,19 @@ static struct type_lookup_t {
 
 static int do_type_lookup(char *type_str)
 {
+	unsigned long tmp;
 	size_t ctr;
+	char *end;
 
 	for (ctr = 0; ctr < ARRAY_SIZE(type_lookup); ++ctr) {
 		if (!strcmp(type_str, type_lookup[ctr].name))
 			return type_lookup[ctr].type;
 	}
+
+	errno = 0;
+	tmp = strtoul(type_str, &end, 0);
+	if (errno == 0 && *end == '\0' && tmp <= 0x7f)
+		return tmp;
 
 	return -ENOENT;
 };
@@ -155,7 +162,7 @@ static void print_usage()
 	printf("usage:\n\tmctp-client [net <net>] eid <eid> type <type> data <data>\n");
 	printf("net defaults to MCTP_NET_ANY, data is space delimited hexadecimal. ");
 	printf("data must be the last parameter\n");
-	printf("possible types:\n");
+	printf("type may be an integer value, or one of:\n");
 	for (ctr = 0; ctr < ARRAY_SIZE(type_lookup); ++ctr) {
 		printf("\t%s: %s\n", type_lookup[ctr].name,
 		       type_lookup[ctr].description);

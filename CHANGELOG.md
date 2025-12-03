@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+1. `mctp-client` can now send requests of arbitrary massage-types, instead of
+   just the named types.
+
 ## [2.4] - 2025-10-28
 
 ### Fixed
